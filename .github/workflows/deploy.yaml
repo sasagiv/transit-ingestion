@@ -24,20 +24,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
 
       - name: Build and push Docker image
         id: build-image
         run: |
-          # Create a unique image tag using the commit SHA (or any unique identifier)
+          # Create a unique image tag using the first 7 characters of the commit SHA
           IMAGE_TAG=${GITHUB_SHA::7}
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
           # Build the image for linux/amd64
           docker build --platform linux/amd64 -t $ECR_REPOSITORY:$IMAGE_TAG .
 
-          # Tag the image with its unique tag and as latest
+          # Tag the image for ECR with the unique tag and as latest
           docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
           docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:latest
 
@@ -48,19 +55,17 @@ jobs:
       - name: Update ECS Task Definition
         id: task-def
         run: |
-          # Construct the full ECR image URI using the pushed image tag
+          # Construct the full ECR image URI using the unique image tag
           IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
           echo "Using image URI: $IMAGE_URI"
 
           # Replace placeholders in ecs_task_def.json with actual values.
-          # The file contains:
-          #   "arn:aws:iam::ACCOUNT_ID:role/ECS_TASK_EXECUTION_ROLE"
-          #   "ECR_REPOSITORY_URI:latest"
-          #   "awslogs-region": "AWS_REGION"
+          # The placeholders are: ACCOUNT_ID, ECS_TASK_EXECUTION_ROLE, ECR_REPOSITORY_URI, AWS_REGION, and ${IMAGE_TAG}
           sed -e "s/ACCOUNT_ID/${AWS_ACCOUNT_ID}/g" \
               -e "s/ECS_TASK_EXECUTION_ROLE/${{ secrets.ECS_TASK_EXECUTION_ROLE }}/g" \
-              -e "s|ECR_REPOSITORY_URI|${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}|g" \
+              -e "s|ECR_REPOSITORY_URI|${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY|g" \
               -e "s/AWS_REGION/${AWS_REGION}/g" \
+              -e "s/\${IMAGE_TAG}/$IMAGE_TAG/g" \
               ecs_task_def.json > ecs_task_def_updated.json
 
           echo "Updated ECS Task Definition:"
@@ -71,11 +76,11 @@ jobs:
 
       - name: Deploy to ECS Service
         run: |
-          # Fetch the latest task definition revision ARN for the specified task family
+          # Fetch the latest task definition revision ARN
           TASK_DEF_ARN=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY --query "taskDefinition.taskDefinitionArn" --output text)
           echo "Latest task definition ARN: $TASK_DEF_ARN"
-          
-          # Update the ECS service to use the new task definition revision.
+
+          # Update the ECS service to use the new task definition revision
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
